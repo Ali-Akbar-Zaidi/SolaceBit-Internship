@@ -3,8 +3,13 @@ node_modules/
 
 # Environment variables
 .env
+.env.*
+!.env.example
 
 # Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 *.log
 
 # OS files
@@ -14,11 +19,19 @@ Thumbs.db
 # Build output
 dist/
 build/
+coverage/
+.nyc_output/
 
 # Temporary files
 .cache/
 tmp/
 temp/
+*.tmp
+*.swp
+
+# Editor/IDE files
+.vscode/
+.idea/
 
 # Saved knowledge bases (embeddings)
 data/
