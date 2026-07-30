@@ -33,5 +33,20 @@ temp/
 .vscode/
 .idea/
 
+# Local generated or irrelevant folders
+out/
+publish/
+htmlcov/
+__pycache__/
+
+# Irrelevant files
+*.pyc
+*.pyo
+*.pyd
+*.sqlite
+*.db
+*.bak
+*.orig
+
 # Saved knowledge bases (embeddings)
 data/
