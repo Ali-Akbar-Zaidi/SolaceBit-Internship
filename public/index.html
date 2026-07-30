@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SiteSage - Website RAG Chatbot</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+        href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet" />
+    <link rel="stylesheet" href="style.css" />
+</head>
+
+<body>
+    <!-- 3D particle nebula (WebGL) layered over the aurora fallback -->
+    <canvas id="bg3d" aria-hidden="true"></canvas>
+
+    <!-- Animated aurora background -->
+    <div class="aurora" id="aurora" aria-hidden="true">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+        <div class="blob blob-3"></div>
+        <div class="blob blob-4"></div>
+    </div>
+
+    <div class="app">
+        <header class="topbar">
+            <div class="brand">
+                <div class="orb-wrap" id="orb-wrap">
+                    <div class="orb" id="brand-orb">
+                        <span class="orb-core"></span>
+                        <span class="orb-ring"></span>
+                        <span class="orb-ring orb-ring-2"></span>
+                        <span class="orb-shine"></span>
+                    </div>
+                </div>
+                <div>
+                    <h1>Site<span>Sage</span></h1>
+                    <p>Turn any website into a conversation - fully local, fully yours</p>
+                </div>
+            </div>
+            <div id="health" class="health" title="Ollama status">
+                <span class="health-dot" id="health-dot"></span>
+                <span id="health-text">Checking Ollama...</span>
+            </div>
+        </header>
+
+        <section class="url-panel glass">
+            <form id="url-form" autocomplete="off">
+                <div class="input-wrap url-wrap">
+                    <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+                        <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+                    </svg>
+                    <input id="url-input" type="text" placeholder="Paste a website URL, e.g. https://example.com"
+                        spellcheck="false" required />
+                </div>
+                <div class="input-wrap pages-wrap" title="Maximum pages to crawl">
+                    <input id="max-pages" type="number" min="1" max="20" value="8" />
+                    <span class="pages-label">pages</span>
+                </div>
+                <button id="index-btn" type="submit" class="btn-primary">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                        stroke-linejoin="round">
+                        <path d="M12 3l1.9 5.7L19.5 10l-5.6 1.3L12 17l-1.9-5.7L4.5 10l5.6-1.3z" />
+                    </svg>
+                    Build Knowledge Base
+                </button>
+            </form>
+
+            <div id="progress" class="progress hidden">
+                <div class="progress-track">
+                    <div id="progress-bar" class="progress-bar"></div>
+                </div>
+                <p id="progress-text"></p>
+            </div>
+
+            <div id="site-info" class="site-info hidden"></div>
+        </section>
+
+        <main id="chat" class="chat glass">
+            <div id="messages" class="messages">
+                <div class="message bot">
+                    <div class="avatar bot-avatar">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="4" y="7" width="16" height="12" rx="3" />
+                            <path d="M12 7V4M8 12h.01M16 12h.01M9 16h6" />
+                        </svg>
+                    </div>
+                    <div class="bubble">
+                        Hey! Paste a website URL above and hit <strong>Build Knowledge Base</strong>.
+                        Once it's indexed, ask me anything about that site - I'll answer straight
+                        from its pages and cite my sources.
+                    </div>
+                </div>
+            </div>
+
+            <form id="chat-form" class="chat-input" autocomplete="off">
+                <input id="chat-text" type="text" placeholder="Ask a question about the website..." disabled />
+                <button id="send-btn" type="submit" class="btn-send" disabled aria-label="Send">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                        stroke-linejoin="round">
+                        <path d="M22 2L11 13" />
+                        <path d="M22 2l-7 20-4-9-9-4z" />
+                    </svg>
+                </button>
+            </form>
+        </main>
+
+        <footer class="footer">
+            100% local pipeline - scraping, embeddings and generation run on your machine via Ollama.
+            Built for the SolaceBit AI/ML internship.
+        </footer>
+    </div>
+
+    <script src="app.js"></script>
+    <script type="module" src="scene.js"></script>
+</body>
+
+</html>

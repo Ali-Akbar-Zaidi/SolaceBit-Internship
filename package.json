@@ -3,9 +3,11 @@
   "version": "1.0.0",
   "description": "Website RAG Chatbot for SolaceBit AI/ML Internship",
   "type": "module",
-  "main": "src/test.js",
+  "main": "src/server/server.js",
   "scripts": {
-    "start": "node src/test.js"
+    "start": "node src/server/server.js",
+    "dev": "node --watch src/server/server.js",
+    "cli": "node src/test.js"
   },
   "keywords": [
     "rag",

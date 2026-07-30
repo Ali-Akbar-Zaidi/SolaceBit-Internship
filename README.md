@@ -25,7 +25,7 @@ Unlike a traditional chatbot, this system grounds its responses using scraped we
   - Headings
   - Paragraphs
 
-### 🚧 Phase 2 – Text Processing
+### ✅ Phase 2 – Text Processing
 - Clean extracted content
 - Remove duplicate text
 - Remove navigation/footer noise
@@ -123,13 +123,26 @@ website-rag-chatbot/
 │
 ├── src/
 │   ├── scraper/
-│   │     └── scraper.js
-│   │
-│   └── test.js
+│   │     ├── scraper.js       # fetch + extract clean content from one page
+│   │     └── crawler.js       # BFS same-site crawler (polite, limited pages)
+│   ├── processing/
+│   │     ├── cleaner.js       # boilerplate removal, dedupe, normalization
+│   │     └── chunker.js       # overlapping word-window chunks + metadata
+│   ├── llm/
+│   │     └── ollama.js        # embed / embedBatch / chat (streamed) / health
+│   ├── vectorstore/
+│   │     └── vectorStore.js   # cosine similarity + top-K search + JSON persistence
+│   ├── rag/
+│   │     ├── prompt.js        # grounded prompt building
+│   │     └── pipeline.js      # indexWebsite() + answerQuestion()
+│   ├── server/
+│   │     └── server.js        # Express REST API + static UI
+│   └── test.js                # CLI end-to-end test (index a site, chat in terminal)
 │
+├── public/                    # chatbot web UI (HTML/CSS/JS)
+├── data/                      # saved knowledge bases (gitignored)
+├── .env.example
 ├── package.json
-├── package-lock.json
-├── .gitignore
 └── README.md
 ```
 
@@ -181,11 +194,34 @@ ollama list
 
 ---
 
-# ▶️ Run the Scraper
+# ▶️ Run It
+
+Start the web app (UI + API):
 
 ```bash
-node src/test.js
+npm start
 ```
+
+Then open http://localhost:3000, enter a website URL, click **Build Knowledge Base**, and start chatting.
+
+Or run the terminal-only end-to-end test:
+
+```bash
+npm run cli
+# or with a custom site:
+node src/test.js https://example.com
+```
+
+## REST API
+
+| Method | Endpoint      | Body                          | Purpose                                  |
+| ------ | ------------- | ----------------------------- | ---------------------------------------- |
+| GET    | `/api/health` | –                             | Ollama reachability + model availability |
+| POST   | `/api/index`  | `{ "url", "maxPages"? }`      | Crawl, chunk, embed, store (async)       |
+| GET    | `/api/status` | –                             | Indexing progress                        |
+| POST   | `/api/chat`   | `{ "question", "history"? }`  | Grounded answer + cited sources          |
+
+Configuration is via `.env` (see `.env.example`): `PORT`, `OLLAMA_URL`, `CHAT_MODEL`, `EMBED_MODEL`, `DATA_DIR`.
 
 ---
 
@@ -200,15 +236,15 @@ node src/test.js
 - [x] Heading extraction
 - [x] Paragraph extraction
 
-- [ ] Text cleaning
-- [ ] Text chunking
-- [ ] Embedding generation
-- [ ] Vector database
-- [ ] Similarity search
-- [ ] Prompt engineering
-- [ ] RAG pipeline
-- [ ] Express API
-- [ ] Chat interface
+- [x] Text cleaning
+- [x] Text chunking
+- [x] Embedding generation
+- [x] Vector store + persistence
+- [x] Similarity search
+- [x] Prompt engineering
+- [x] RAG pipeline
+- [x] Express API
+- [x] Chat interface
 
 ---
 
