@@ -59,7 +59,7 @@
                         spellcheck="false" required />
                 </div>
                 <div class="input-wrap pages-wrap" title="Maximum pages to crawl">
-                    <input id="max-pages" type="number" min="1" max="20" value="8" />
+                    <input id="max-pages" type="number" min="1" max="30" value="12" />
                     <span class="pages-label">pages</span>
                 </div>
                 <button id="index-btn" type="submit" class="btn-primary">
@@ -79,6 +79,14 @@
             </div>
 
             <div id="site-info" class="site-info hidden"></div>
+
+            <div id="kb-panel" class="kb-panel">
+                <div class="kb-head">
+                    <span id="kb-summary">Loading knowledge bases...</span>
+                    <button id="kb-refresh" type="button" class="kb-refresh" title="Refresh">Refresh</button>
+                </div>
+                <ul id="kb-list" class="kb-list"></ul>
+            </div>
         </section>
 
         <main id="chat" class="chat glass">
@@ -93,8 +101,9 @@
                     </div>
                     <div class="bubble">
                         Hey! Paste a website URL above and hit <strong>Build Knowledge Base</strong>.
-                        Once it's indexed, ask me anything about that site - I'll answer straight
-                        from its pages and cite my sources.
+                        I'll index it with Puppeteer (so JavaScript content is captured), chunk it with 
+                        tiktoken, embed it with Ollama, and store it in Supabase pgvector. Once indexed, 
+                        ask me anything - I search across all your knowledge bases at once and cite my sources.
                     </div>
                 </div>
             </div>

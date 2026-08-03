@@ -1,292 +1,145 @@
-# 🤖 Website RAG Chatbot
+# Website RAG Chatbot
 
-> An AI-powered Retrieval-Augmented Generation (RAG) chatbot that scrapes website content, generates semantic embeddings locally using Ollama, performs vector similarity search, and answers user questions using relevant context.
+A retrieval-augmented chatbot that answers questions from websites you index yourself. Paste a URL, it renders and stores the pages, and questions are answered only from that content — anything outside it is refused.
 
----
+Puppeteer for scraping, tiktoken for chunking, Supabase pgvector for storage, local Ollama for inference. No prefetched corpus: you build it.
 
-## 📌 Project Overview
+## How it works
 
-This project is being developed as part of my **AI/ML Internship at SolaceBit**.
+**Indexing** — Puppeteer renders each page in real Chromium, so JavaScript-driven content is captured. Navigation, cookie notices, tables of contents and bibliography listings are stripped. The remaining prose is split into token-measured chunks, embedded, and written to Postgres.
 
-The objective is to build a complete **Retrieval-Augmented Generation (RAG)** pipeline capable of answering questions about any website by first retrieving relevant information instead of relying solely on the Large Language Model's internal knowledge.
+**Answering** — the question is embedded and matched against every indexed site at once. Retrieved passages are handed to the model with instructions to quote them rather than explain the topic. If the corpus does not cover the question, the model is never called.
 
-Unlike a traditional chatbot, this system grounds its responses using scraped website content, resulting in more accurate, reliable, and context-aware answers.
+## Why questions get refused
 
----
+This is the part most RAG demos get wrong, so it is worth stating plainly: **cosine similarity alone cannot decide relevance.** Measured against a Wikipedia article on the Indian Rebellion of 1857:
 
-# 🚀 Features
+| question | best score | verdict |
+|---|---|---|
+| `what was the Indian Rebellion of 1857` | 0.765 | genuine |
+| `who were the sepoys` | 0.651 | genuine |
+| `what was the war of lalalala land` | **0.603** | nonsense |
+| `what is the current price of Bitcoin` | 0.459 | off topic |
 
-### ✅ Phase 1 – Website Scraping
-- Scrape any publicly accessible webpage
-- Download raw HTML
-- Parse HTML using Cheerio
-- Extract:
-  - Page Title
-  - Headings
-  - Paragraphs
+Nonsense scores 0.603 because "war" genuinely sits near "rebellion" in embedding space — only 0.048 below a real question. A 0.62 threshold would work on this corpus and reject *every* real question on another whose genuine matches peak at 0.53.
 
-### ✅ Phase 2 – Text Processing
-- Clean extracted content
-- Remove duplicate text
-- Remove navigation/footer noise
-- Normalize whitespace
-- Split content into overlapping chunks
+So relevance is decided in three layers:
 
-### 🚧 Phase 3 – Embeddings
-- Generate embeddings locally using Ollama
-- Use `nomic-embed-text`
-- Convert text chunks into vector representations
+1. **Absolute floor** (`RETRIEVAL_MIN_SCORE`, low by design) — rejects a question with no match anywhere.
+2. **Relative cutoff** (`RETRIEVAL_RELATIVE_CUTOFF`) — keeps chunks near the best hit, adapting to whatever the corpus scores.
+3. **Lexical gate** (`GROUNDING_MIN_TERM_RATIO`) — the question's distinctive words must actually appear in the retrieved text. `lalalala` appears nowhere, so it is refused regardless of score.
 
-### 🚧 Phase 4 – Vector Search
-- Store embeddings
-- Compute cosine similarity
-- Retrieve the most relevant chunks
+Prefix matching keeps plurals and inflections working, and only a fraction of terms is required, so paraphrases still answer.
 
-### 🚧 Phase 5 – RAG Pipeline
-- Retrieve relevant chunks
-- Build contextual prompts
-- Send prompts to Llama 3
-- Generate grounded responses
+## Prerequisites
 
-### 🚧 Phase 6 – Chat Interface
-- Express backend
-- REST API
-- Interactive chatbot interface
+- **Node.js 20+**
+- **Ollama** with two models pulled:
+  ```bash
+  ollama pull llama3.2:1b
+  ollama pull nomic-embed-text
+  ```
+- **Supabase** project (free tier is fine)
 
----
-
-# 🏗️ System Architecture
-
-```text
-Website URL
-      │
-      ▼
- Website Scraper
-      │
-      ▼
- Text Cleaner
-      │
-      ▼
- Text Chunker
-      │
-      ▼
- Embedding Generator
- (nomic-embed-text)
-      │
-      ▼
- Vector Store
-      │
-      ▼
- Similarity Search
-      │
-      ▼
- Relevant Context
-      │
-      ▼
-     Llama 3
-      │
-      ▼
- Final Answer
-```
-
----
-
-# 🛠️ Tech Stack
-
-## Backend
-
-- Node.js
-- Express.js
-
-## Web Scraping
-
-- Axios
-- Cheerio
-
-## AI / Machine Learning
-
-- Ollama
-- Llama 3
-- nomic-embed-text
-
-## Version Control
-
-- Git
-- GitHub
-
----
-
-# 📂 Project Structure
-
-```text
-website-rag-chatbot/
-│
-├── src/
-│   ├── scraper/
-│   │     ├── scraper.js       # fetch + extract clean content from one page
-│   │     └── crawler.js       # BFS same-site crawler (polite, limited pages)
-│   ├── processing/
-│   │     ├── cleaner.js       # boilerplate removal, dedupe, normalization
-│   │     └── chunker.js       # overlapping word-window chunks + metadata
-│   ├── llm/
-│   │     └── ollama.js        # embed / embedBatch / chat (streamed) / health
-│   ├── vectorstore/
-│   │     └── vectorStore.js   # cosine similarity + top-K search + JSON persistence
-│   ├── rag/
-│   │     ├── prompt.js        # grounded prompt building
-│   │     └── pipeline.js      # indexWebsite() + answerQuestion()
-│   ├── server/
-│   │     └── server.js        # Express REST API + static UI
-│   └── test.js                # CLI end-to-end test (index a site, chat in terminal)
-│
-├── public/                    # chatbot web UI (HTML/CSS/JS)
-├── data/                      # saved knowledge bases (gitignored)
-├── .env.example
-├── package.json
-└── README.md
-```
-
----
-
-# ⚙️ Installation
-
-Clone the repository
-
-```bash
-git clone https://github.com/Ali-Akbar-Zaidi/SolaceBit-Internship.git
-```
-
-Navigate into the project
-
-```bash
-cd website-rag-chatbot
-```
-
-Install dependencies
+## Setup
 
 ```bash
 npm install
+cp .env.example .env     # then fill in DATABASE_URL
+npm run migrate          # creates tables, pgvector, match_chunks()
+npm start                # http://localhost:3000
 ```
 
----
+`DATABASE_URL` must be the **connection pooler** string from *Supabase → Project Settings → Database → Connection pooling*. Server-side writes go through the Postgres role, not the publishable API key — that key is RLS-restricted and cannot write embeddings.
 
-# 🤖 Install Ollama
+Every other setting in `.env.example` has a working default and is documented inline.
 
-Download Ollama from:
+## Usage
 
-https://ollama.com
-
-Pull the required models
+Paste a URL in the UI, set a page limit, and click **Build Knowledge Base**. Sites **stack**: each one you add joins the corpus, and every question searches all of them. The panel lists what is indexed and lets you remove entries.
 
 ```bash
-ollama pull llama3
+npm run cli                        # chat against everything indexed
+npm run cli https://example.com    # index a site, then chat
 ```
+
+## API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/health` | Ollama + database status, corpus stats |
+| GET | `/api/sites` | List knowledge bases |
+| GET | `/api/sites/:id` | Pages within one knowledge base |
+| POST | `/api/index` | `{ url, maxPages? }` — starts indexing |
+| GET | `/api/status` | Progress of running jobs |
+| POST | `/api/chat` | `{ question, history? }` — streams NDJSON |
+| DELETE | `/api/sites/:id` | Remove a knowledge base |
+
+## Performance
+
+Measured on a 12th-gen i5, CPU-only, with `llama3.2:1b`:
+
+| | |
+|---|---|
+| refusal (no model call) | ~1.4s |
+| answered question, first token | ~8s |
+| indexing | ~4-6s per page |
+
+Prompt prefill runs at 90-240 tok/s and **is** the bottleneck. Thread count barely matters (8 threads: 97 tok/s vs 90 default), so the lever is context size: `CHUNK_TOKENS`, `RETRIEVAL_TOP_K` and `RETRIEVAL_MAX_TOKENS`. Run `npm run diagnose` to see the breakdown on your own machine, or `node scripts/bench.js` to measure prefill directly.
+
+For better synthesis on broad questions, set `CHAT_MODEL=llama3:latest` and expect ~40s to first token instead of ~8s.
+
+## Project structure
+
+```
+src/
+├── scraper/
+│   ├── scraper.js          Puppeteer renderer + DOM text extraction
+│   └── crawler.js          Same-origin BFS; filters site machinery
+├── processing/
+│   ├── cleaner.js          Boilerplate, cookie notices, TOC removal
+│   └── chunker.js          tiktoken chunking + listing/prose filters
+├── llm/ollama.js           Embeddings (L2-normalised) + streaming chat
+├── vectorstore/            pgvector search, relative cutoff, token budget
+├── rag/
+│   ├── prompt.js           Extract-not-explain prompt
+│   └── pipeline.js         Indexing, retrieval, relevance gate, refusal
+├── db/client.js            Pooled Postgres, migrations, health
+└── server/server.js        Express API + static UI
+
+db/schema.sql               Tables, HNSW index, match_chunks()
+scripts/                    migrate, reindex, diagnose, bench, tests
+public/                     UI
+```
+
+## Testing
 
 ```bash
-ollama pull nomic-embed-text
+npm test                # 8 suites: unit + integration
+npm run diagnose        # latency and grounding on the live corpus
+node scripts/reindex.js # rebuild after changing chunking settings
 ```
 
-Verify installation
+Unit suites (chunker, cleaner, listing filter, boilerplate filter, crawler link filter) need nothing external. Integration suites need Ollama, Supabase and at least one indexed site, and are skipped with a message when unavailable rather than reported as failures.
 
+**Re-index after changing `CHUNK_TOKENS`, the cleaner or the chunk filters.** Stored chunks are a product of the settings that were active when they were written.
+
+## Troubleshooting
+
+**"Ollama is not reachable"** — `ollama serve`, then pull both models.
+
+**"Database schema incomplete"** — `npm run migrate`.
+
+**Legitimate questions being refused** — lower `GROUNDING_MIN_TERM_RATIO`. The gate is lexical, so a question phrased entirely in synonyms of the source text can be rejected.
+
+**Answers quote instead of summarising** — a `llama3.2:1b` limitation on broad questions, not a retrieval fault. Specific questions produce clean prose; `llama3:latest` synthesises better but is far slower.
+
+**Chromium download blocked**
 ```bash
-ollama list
+PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true npm install
+# then set PUPPETEER_EXECUTABLE_PATH to an existing Chrome
 ```
 
----
+## License
 
-# ▶️ Run It
-
-Start the web app (UI + API):
-
-```bash
-npm start
-```
-
-Then open http://localhost:3000, enter a website URL, click **Build Knowledge Base**, and start chatting.
-
-Or run the terminal-only end-to-end test:
-
-```bash
-npm run cli
-# or with a custom site:
-node src/test.js https://example.com
-```
-
-## REST API
-
-| Method | Endpoint      | Body                          | Purpose                                  |
-| ------ | ------------- | ----------------------------- | ---------------------------------------- |
-| GET    | `/api/health` | –                             | Ollama reachability + model availability |
-| POST   | `/api/index`  | `{ "url", "maxPages"? }`      | Crawl, chunk, embed, store (async)       |
-| GET    | `/api/status` | –                             | Indexing progress                        |
-| POST   | `/api/chat`   | `{ "question", "history"? }`  | Grounded answer + cited sources          |
-
-Configuration is via `.env` (see `.env.example`): `PORT`, `OLLAMA_URL`, `CHAT_MODEL`, `EMBED_MODEL`, `DATA_DIR`.
-
----
-
-# 📈 Development Roadmap
-
-- [x] Project setup
-- [x] Git repository
-- [x] GitHub integration
-- [x] Website scraper
-- [x] HTML parsing
-- [x] Title extraction
-- [x] Heading extraction
-- [x] Paragraph extraction
-
-- [x] Text cleaning
-- [x] Text chunking
-- [x] Embedding generation
-- [x] Vector store + persistence
-- [x] Similarity search
-- [x] Prompt engineering
-- [x] RAG pipeline
-- [x] Express API
-- [x] Chat interface
-
----
-
-# 📚 Concepts Covered
-
-This project demonstrates practical implementation of:
-
-- Retrieval-Augmented Generation (RAG)
-- Semantic Search
-- Embeddings
-- Vector Similarity Search
-- Cosine Similarity
-- Local LLM Inference
-- Prompt Engineering
-- HTML Parsing
-- Web Scraping
-- REST APIs
-- JavaScript Async Programming
-
----
-
-# 🎯 Learning Objectives
-
-- Understand how modern RAG systems work
-- Build an end-to-end AI application
-- Work with local LLMs using Ollama
-- Generate semantic embeddings
-- Implement retrieval-based question answering
-- Gain practical AI engineering experience
-
----
-
-# 👨‍💻 Author
-
-**Ali Akbar Zaidi**
-
-AI/ML Intern — SolaceBit
-
-GitHub: https://github.com/Ali-Akbar-Zaidi
-
----
-
-# 📄 License
-
-This project is developed for educational and internship purposes.
+ISC — Ali Akbar Zaidi, SolaceBit AI/ML internship.

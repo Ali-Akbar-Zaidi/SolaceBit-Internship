@@ -888,3 +888,119 @@ input:focus-visible {
         height: 48px;
     }
 }
+.kb-panel {
+    margin-top: 20px;
+    animation: rise 0.5s ease both;
+}
+
+.kb-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
+.kb-head span {
+    font-size: 0.875rem;
+    color: var(--muted);
+    font-family: var(--font-mono);
+}
+
+.kb-refresh {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.8rem;
+    padding: 4px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.kb-refresh:hover {
+    border-color: var(--border-strong);
+    color: var(--text);
+}
+
+.kb-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.kb-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 10px 14px;
+    transition: all 0.25s;
+}
+
+.kb-item:hover {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: var(--border-strong);
+}
+
+.kb-ready {
+    border-left: 3px solid var(--ok);
+}
+
+.kb-indexing, .kb-pending {
+    border-left: 3px solid var(--gold);
+}
+
+.kb-failed {
+    border-left: 3px solid var(--bad);
+}
+
+.kb-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.kb-title {
+    color: var(--text);
+    text-decoration: none;
+    font-weight: 500;
+    font-size: 0.9rem;
+    transition: color 0.2s;
+}
+
+.kb-title:hover {
+    color: var(--cyan);
+}
+
+.kb-meta {
+    font-size: 0.78rem;
+    color: var(--muted);
+    font-family: var(--font-mono);
+}
+
+.kb-delete {
+    background: none;
+    border: 1px solid rgba(251, 113, 133, 0.3);
+    color: var(--bad);
+    font-size: 0.78rem;
+    padding: 5px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.kb-delete:hover {
+    background: rgba(251, 113, 133, 0.1);
+    border-color: var(--bad);
+}
+
+.kb-delete:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}

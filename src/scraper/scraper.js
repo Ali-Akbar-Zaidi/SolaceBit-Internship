@@ -1,179 +1,249 @@
-import axios from "axios";
-import * as cheerio from "cheerio";
+import crypto from "node:crypto";
+
+import puppeteer from "puppeteer";
 
 /**
- * Phase 1 - Website Scraper
+ * Puppeteer-based scraper.
  *
- * Fetches a single page's raw HTML and extracts the meaningful content
- * (title, headings, paragraphs, list items) while discarding boilerplate
- * such as navigation bars, footers, scripts, styles and ads.
+ * Renders each page in a real Chromium instance so JavaScript-driven content
+ * (SPAs, lazy-loaded sections, client-side routing) is captured. A static HTML
+ * parser only sees the initial server response, which on a modern site is
+ * often an empty shell.
+ *
+ * One browser is shared across an entire crawl and pages are opened and closed
+ * around it; launching Chromium per URL would dominate the runtime.
  */
 
 const USER_AGENT =
-    "Mozilla/5.0 (compatible; WebsiteRagChatbot/1.0; educational internship project)";
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+    "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
 
-// Elements that never contain useful article text.
+// Resource types that never contribute text. Blocking them cuts page load time
+// dramatically and avoids downloading megabytes of images per page.
+const BLOCKED_RESOURCES = new Set(["image", "media", "font", "stylesheet"]);
+
+// Elements removed before text extraction: chrome, navigation and adverts.
 const NOISE_SELECTORS = [
-    "script",
-    "style",
-    "noscript",
-    "iframe",
-    "svg",
-    "canvas",
-    "form",
-    "nav",
-    "footer",
-    "header",
-    "aside",
-    "button",
-    "[role='navigation']",
-    "[role='banner']",
-    "[role='contentinfo']",
-    "[aria-hidden='true']",
-    ".nav",
-    ".navbar",
-    ".menu",
-    ".footer",
-    ".sidebar",
-    ".advertisement",
-    ".cookie",
-    ".cookie-banner",
-].join(", ");
+    "script", "style", "noscript", "iframe", "svg", "canvas", "form",
+    "nav", "footer", "header", "aside", "button", "template",
+    "[role='navigation']", "[role='banner']", "[role='contentinfo']",
+    "[role='search']", "[aria-hidden='true']", "[hidden]",
+    ".nav", ".navbar", ".menu", ".footer", ".sidebar",
+    ".advertisement", ".ads", ".cookie", ".cookie-banner", ".newsletter",
+    ".social-share", ".breadcrumb", ".pagination", ".skip-link",
+];
 
-/**
- * Downloads the raw HTML of a URL.
- * Throws if the response is not HTML or the request fails.
- */
-export async function fetchHtml(url) {
-    const response = await axios.get(url, {
-        timeout: 15000,
-        maxRedirects: 5,
-        responseType: "text",
-        headers: {
-            "User-Agent": USER_AGENT,
-            Accept: "text/html,application/xhtml+xml",
-        },
-        // Treat 4xx/5xx as errors so we can report them clearly.
-        validateStatus: (status) => status >= 200 && status < 300,
+/** Launches a shared Chromium instance for a crawl. */
+export async function launchBrowser(options = {}) {
+    const { headless = true } = options;
+    return puppeteer.launch({
+        headless,
+        args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-blink-features=AutomationControlled",
+            "--window-size=1366,900",
+        ],
     });
-
-    const contentType = String(response.headers["content-type"] || "");
-    if (!contentType.includes("html")) {
-        throw new Error(`Not an HTML page (content-type: ${contentType})`);
-    }
-
-    return response.data;
 }
 
 /**
- * Parses raw HTML and extracts structured, de-noised content.
- * Returns { url, title, headings, paragraphs, text, links }.
+ * Extraction runs inside the browser. Receives the noise selectors because
+ * the page context has no access to Node scope.
+ *
+ * Captures all visible text. Headings structure the output; everything else
+ * is harvested from innerText so modern generic-container sites are covered.
  */
-export function extractContent(html, url) {
-    const $ = cheerio.load(html);
-
+function extractInPage(noiseSelectors) {
     const title =
-        $("title").first().text().trim() ||
-        $("h1").first().text().trim() ||
-        url;
+        document.title?.trim() ||
+        document.querySelector("h1")?.innerText?.trim() ||
+        location.href;
 
-    // Collect in-site links BEFORE removing <nav>/<header>, because most
-    // internal navigation links live there. The crawler needs them.
-    const links = [];
-    $("a[href]").each((_, el) => {
-        links.push($(el).attr("href"));
-    });
+    // Links are harvested before pruning: most internal navigation lives in the
+    // <nav> and <header> elements that are about to be removed.
+    const links = Array.from(document.querySelectorAll("a[href]"))
+        .map((a) => a.getAttribute("href"))
+        .filter(Boolean);
 
-    // Now strip everything that is not real content.
-    $(NOISE_SELECTORS).remove();
+    // Operate on a detached clone so the live DOM is never mutated.
+    const root = document.body.cloneNode(true);
+    root.querySelectorAll(noiseSelectors.join(",")).forEach((el) => el.remove());
 
-    // Prefer the semantic content root when the site provides one.
-    const $root = $("main").length
-        ? $("main").first()
-        : $("article").length
-            ? $("article").first()
-            : $("body");
+    // Prefer a semantic content root when the page provides one.
+    const main =
+        root.querySelector("main") ||
+        root.querySelector("article") ||
+        root.querySelector("[role='main']") ||
+        root;
 
     const headings = [];
-    $root.find("h1, h2, h3, h4").each((_, el) => {
-        const heading = $(el).text().replace(/\s+/g, " ").trim();
-        if (heading.length > 0) headings.push(heading);
-    });
-
     const paragraphs = [];
-    $root.find("p, li, blockquote, pre, td").each((_, el) => {
-        // Skip nested duplicates (e.g. a <p> inside an <li> we already took).
-        if ($(el).parents("li, blockquote, td").length > 0 && el.tagName === "p") {
-            return;
-        }
-        const text = $(el).text().replace(/\s+/g, " ").trim();
-        if (text.length > 0) paragraphs.push(text);
-    });
-
-    // Build one readable text document: headings act as section markers so
-    // the chunker can keep related sentences together.
-    const seen = new Set();
     const lines = [];
 
-    $root.find("h1, h2, h3, h4, p, li, blockquote, pre, td").each((_, el) => {
-        if ($(el).parents("li, blockquote, td").length > 0 && el.tagName === "p") {
-            return;
+    // Block-level containers that may hold text. Modern sites put content in
+    // div/span/section, so restricting this to p/li/blockquote would miss
+    // JS-rendered cards, quotes and other generic-container layouts.
+    const blockSelectors = [
+        "p", "li", "blockquote", "pre", "td", "th", "dd", "dt", "figcaption",
+        "div", "section", "article", "aside", "span",
+    ];
+    const headingSelector = "h1, h2, h3, h4, h5, h6";
+    const blockSelector = blockSelectors.join(",");
+
+    // One ordered pass over headings and blocks together. querySelectorAll
+    // yields document order, which keeps each heading attached to the text it
+    // introduces - important because chunks are later split on those markers.
+    const nodes = main.querySelectorAll(`${headingSelector},${blockSelector}`);
+
+    const seen = new Set();
+    for (const el of nodes) {
+        const isHeading = /^h[1-6]$/i.test(el.tagName);
+
+        // Only take leaf blocks. A container is skipped when it holds another
+        // block or a heading, otherwise a wrapper <div> would both duplicate
+        // its children's text and consume the heading before the <h*> node is
+        // reached (document order puts the wrapper first).
+        if (!isHeading && el.querySelector(`${blockSelector},${headingSelector}`)) {
+            continue;
         }
-        const text = $(el).text().replace(/\s+/g, " ").trim();
-        if (text.length === 0 || seen.has(text)) return;
+
+        const text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+        if (!text || seen.has(text)) continue;
+        if (!isHeading && text.length < 3) continue;
         seen.add(text);
 
-        if (/^h[1-4]$/.test(el.tagName)) {
+        if (isHeading) {
+            headings.push(text);
             lines.push(`\n## ${text}\n`);
         } else {
+            paragraphs.push(text);
             lines.push(text);
         }
-    });
+    }
 
-    const text = lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
-
-    return { url, title, headings, paragraphs, text, links };
+    return {
+        title,
+        headings,
+        paragraphs,
+        links,
+        text: lines.join("\n").replace(/\n{3,}/g, "\n\n").trim(),
+    };
 }
 
 /**
- * Scrapes a single webpage: fetch + extract.
+ * Scrolls to the bottom in steps to trigger lazy-loaded and infinite-scroll
+ * content, then returns to the top. Bounded so an endless feed cannot hang
+ * the crawl.
  */
-export async function scrapePage(url) {
-    const html = await fetchHtml(url);
-    return extractContent(html, url);
+async function autoScroll(page, maxScrolls = 12) {
+    await page.evaluate(async (limit) => {
+        await new Promise((resolve) => {
+            let scrolled = 0;
+            const step = window.innerHeight;
+            const timer = setInterval(() => {
+                window.scrollBy(0, step);
+                scrolled += 1;
+                const atBottom =
+                    window.innerHeight + window.scrollY >=
+                    document.body.scrollHeight - 100;
+                if (atBottom || scrolled >= limit) {
+                    clearInterval(timer);
+                    window.scrollTo(0, 0);
+                    resolve();
+                }
+            }, 220);
+        });
+    }, maxScrolls);
 }
 
 /**
- * Backwards-compatible helper kept from Phase 1: scrapes a page and
- * prints a readable report to the console.
+ * Renders one URL and extracts its content.
+ *
+ * Returns { url, title, headings, paragraphs, text, links, contentHash }.
+ * `url` is the post-redirect address so the crawler records where it landed.
  */
-export async function scrapeWebsite(url) {
+export async function scrapePage(browser, url, options = {}) {
+    const {
+        timeout = 30_000,
+        waitUntil = "networkidle2",
+        scroll = true,
+        settleMs = 600,
+    } = options;
+
+    const page = await browser.newPage();
+
     try {
-        const page = await scrapePage(url);
+        await page.setUserAgent(USER_AGENT);
+        await page.setViewport({ width: 1366, height: 900 });
+        await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
 
-        console.log("\n==============================");
-        console.log("PAGE TITLE");
-        console.log("==============================");
-        console.log(page.title);
-
-        console.log("\n==============================");
-        console.log("HEADINGS");
-        console.log("==============================");
-        page.headings.forEach((heading, index) => {
-            console.log(`${index + 1}. ${heading}`);
+        // Hide the automation flag; some sites serve a blank page to headless.
+        await page.evaluateOnNewDocument(() => {
+            Object.defineProperty(navigator, "webdriver", { get: () => undefined });
         });
 
-        console.log("\n==============================");
-        console.log("PARAGRAPHS");
-        console.log("==============================");
-        page.paragraphs.forEach((paragraph, index) => {
-            console.log(`${index + 1}. ${paragraph}\n`);
+        await page.setRequestInterception(true);
+        page.on("request", (request) => {
+            if (request.isInterceptedRequestHandled?.()) return;
+            if (BLOCKED_RESOURCES.has(request.resourceType())) {
+                request.abort().catch(() => { });
+            } else {
+                request.continue().catch(() => { });
+            }
         });
 
-        return page;
-    } catch (error) {
-        console.error("Error scraping website:");
-        console.error(error.message);
-        return null;
+        const response = await page.goto(url, { waitUntil, timeout });
+
+        if (!response) {
+            throw new Error("Navigation returned no response");
+        }
+        const status = response.status();
+        if (status >= 400) {
+            throw new Error(`HTTP ${status}`);
+        }
+        const contentType = String(response.headers()["content-type"] || "");
+        if (contentType && !contentType.includes("html")) {
+            throw new Error(`Not an HTML page (content-type: ${contentType})`);
+        }
+
+        // Give client-side frameworks a moment to paint after network idle.
+        await page.waitForSelector("body", { timeout: 5_000 }).catch(() => { });
+        if (scroll) {
+            await autoScroll(page).catch(() => { });
+        }
+        if (settleMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, settleMs));
+        }
+
+        const extracted = await page.evaluate(extractInPage, NOISE_SELECTORS);
+        const finalUrl = page.url();
+
+        return {
+            url: finalUrl,
+            title: extracted.title || finalUrl,
+            headings: extracted.headings,
+            paragraphs: extracted.paragraphs,
+            text: extracted.text,
+            links: extracted.links,
+            contentHash: crypto
+                .createHash("sha256")
+                .update(extracted.text)
+                .digest("hex"),
+        };
+    } finally {
+        await page.close().catch(() => { });
+    }
+}
+
+/** Scrapes a single URL, managing the browser lifecycle. Convenience helper. */
+export async function scrapeSingle(url, options = {}) {
+    const browser = await launchBrowser(options);
+    try {
+        return await scrapePage(browser, url, options);
+    } finally {
+        await browser.close().catch(() => { });
     }
 }

@@ -1,28 +1,37 @@
 {
   "name": "website-rag-chatbot",
-  "version": "1.0.0",
-  "description": "Website RAG Chatbot for SolaceBit AI/ML Internship",
+  "version": "2.0.0",
+  "description": "Multi-site RAG chatbot: Puppeteer scraping, token-aware chunking, Supabase pgvector retrieval, local Ollama inference",
   "type": "module",
   "main": "src/server/server.js",
   "scripts": {
     "start": "node src/server/server.js",
     "dev": "node --watch src/server/server.js",
-    "cli": "node src/test.js"
+    "migrate": "node scripts/migrate.js",
+    "cli": "node src/test.js",
+    "test": "node scripts/test-all.js",
+    "diagnose": "node scripts/diagnose.js"
   },
   "keywords": [
     "rag",
     "ollama",
-    "cheerio",
-    "scraper",
+    "puppeteer",
+    "supabase",
+    "pgvector",
+    "embeddings",
     "nodejs"
   ],
   "author": "Ali Akbar Zaidi",
   "license": "ISC",
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
-    "axios": "^1.18.1",
-    "cheerio": "^1.2.0",
-    "cors": "^2.8.6",
-    "dotenv": "^17.4.2",
-    "express": "^5.2.1"
+    "cors": "2.8.6",
+    "dotenv": "17.4.2",
+    "express": "5.2.1",
+    "pg": "8.16.3",
+    "puppeteer": "24.24.0",
+    "tiktoken": "1.0.21"
   }
 }

@@ -1,8 +1,14 @@
 /**
- * SiteSage UI logic:
- * - health badge (is Ollama up?)
- * - build knowledge base (POST /api/index, then poll /api/status)
- * - chat with LIVE token streaming (reads the NDJSON stream from /api/chat)
+ * SiteSage UI logic.
+ *
+ * - health badge (Ollama + Supabase reachability)
+ * - knowledge base inventory with per-site delete
+ * - indexing with progress polling
+ * - chat with live token streaming over NDJSON
+ *
+ * Answers are retrieved across every ready knowledge base at once, so chat is
+ * enabled as soon as the corpus is non-empty rather than after indexing a site
+ * in this particular session.
  */
 
 const urlForm = document.getElementById("url-form");
@@ -22,8 +28,11 @@ const healthText = document.getElementById("health-text");
 const brandOrb = document.getElementById("brand-orb");
 const orbWrap = document.getElementById("orb-wrap");
 const aurora = document.getElementById("aurora");
+const kbSummary = document.getElementById("kb-summary");
+const kbList = document.getElementById("kb-list");
+const kbRefresh = document.getElementById("kb-refresh");
 
-// Recent conversation turns sent to the server so follow-ups work.
+// Recent conversation turns, sent so follow-up questions resolve.
 const history = [];
 
 const BOT_AVATAR_SVG =
@@ -31,7 +40,7 @@ const BOT_AVATAR_SVG =
     '<rect x="4" y="7" width="16" height="12" rx="3"/><path d="M12 7V4M8 12h.01M16 12h.01M9 16h6"/></svg>';
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Message helpers
 // ---------------------------------------------------------------------------
 
 function makeMessage(role) {
@@ -71,7 +80,12 @@ function appendSources(bubble, sources) {
         link.href = source.url;
         link.target = "_blank";
         link.rel = "noopener noreferrer";
-        link.textContent = source.title || source.url;
+        link.textContent = source.siteTitle
+            ? `${source.title} - ${source.siteTitle}`
+            : source.title || source.url;
+        if (typeof source.score === "number") {
+            link.title = `similarity ${source.score}`;
+        }
         sourcesEl.appendChild(link);
         if (i < sources.length - 1) sourcesEl.append("  ·  ");
     });
@@ -88,7 +102,6 @@ function addTyping() {
 function setChatEnabled(enabled) {
     chatText.disabled = !enabled;
     sendBtn.disabled = !enabled;
-    if (enabled) chatText.focus();
 }
 
 function setProgress(percent, text) {
@@ -97,23 +110,93 @@ function setProgress(percent, text) {
     progressText.textContent = text;
 }
 
-function showSiteInfo(site) {
-    siteInfo.classList.remove("hidden");
-    siteInfo.innerHTML = "";
-    const strong = document.createElement("strong");
-    strong.textContent = site.title || site.url;
-    siteInfo.appendChild(strong);
-    siteInfo.append(
-        ` - ${site.pages.length} page${site.pages.length === 1 ? "" : "s"} crawled, ` +
-        `${site.chunks} chunks embedded. Ready to chat.`
-    );
+// ---------------------------------------------------------------------------
+// Knowledge base inventory
+// ---------------------------------------------------------------------------
+
+function renderSites(sites, stats) {
+    kbList.innerHTML = "";
+
+    if (!sites || sites.length === 0) {
+        kbSummary.textContent = "No knowledge bases yet. Index a site to begin.";
+        return;
+    }
+
+    const ready = sites.filter((s) => s.status === "ready");
+    kbSummary.textContent =
+        `${ready.length} site${ready.length === 1 ? "" : "s"} ready` +
+        (stats ? ` · ${stats.pages} pages · ${stats.chunks} chunks` : "");
+
+    for (const site of sites) {
+        const item = document.createElement("li");
+        item.className = `kb-item kb-${site.status}`;
+
+        const main = document.createElement("div");
+        main.className = "kb-main";
+
+        const link = document.createElement("a");
+        link.href = site.site_url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.className = "kb-title";
+        link.textContent = site.site_title || site.site_url;
+        main.appendChild(link);
+
+        const meta = document.createElement("span");
+        meta.className = "kb-meta";
+        meta.textContent =
+            site.status === "ready"
+                ? `${site.page_count} pages · ${site.chunk_count} chunks`
+                : site.status === "failed"
+                    ? `failed: ${site.error || "unknown error"}`
+                    : site.status;
+        main.appendChild(meta);
+
+        item.appendChild(main);
+
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "kb-delete";
+        remove.textContent = "Remove";
+        remove.addEventListener("click", async () => {
+            remove.disabled = true;
+            try {
+                const res = await fetch(`/api/sites/${site.id}`, { method: "DELETE" });
+                if (!res.ok) {
+                    const data = await res.json().catch(() => ({}));
+                    throw new Error(data.error || `status ${res.status}`);
+                }
+                await loadSites();
+                await checkHealth();
+            } catch (error) {
+                remove.disabled = false;
+                addMessage("error", `Could not remove that knowledge base: ${error.message}`);
+            }
+        });
+        item.appendChild(remove);
+
+        kbList.appendChild(item);
+    }
 }
 
+async function loadSites() {
+    try {
+        const res = await fetch("/api/sites");
+        const data = await res.json();
+        renderSites(data.sites, data.stats);
+        return data;
+    } catch {
+        kbSummary.textContent = "Could not load knowledge bases.";
+        return null;
+    }
+}
+
+kbRefresh?.addEventListener("click", loadSites);
+
 // ---------------------------------------------------------------------------
-// 3D motion: cursor-tracked tilt on the glass panels, a spotlight highlight,
-// gentle parallax on the aurora, and the brand orb turning to face the
-// cursor. All of this is skipped on touch devices (no hover) and respects
-// prefers-reduced-motion via CSS.
+// 3D motion: cursor-tracked tilt, spotlight highlight, aurora parallax and a
+// brand orb that turns toward the cursor. Skipped on touch devices; CSS honours
+// prefers-reduced-motion.
 // ---------------------------------------------------------------------------
 
 const canHover = window.matchMedia("(hover: hover)").matches;
@@ -145,7 +228,6 @@ if (canHover && !prefersReducedMotion) {
     attachTilt(document.querySelector(".chat"), 2);
 
     document.addEventListener("mousemove", (event) => {
-        // Orb turns toward the cursor, like a snow globe tracking a hand.
         if (orbWrap) {
             const rect = orbWrap.getBoundingClientRect();
             const cx = rect.left + rect.width / 2;
@@ -154,7 +236,6 @@ if (canHover && !prefersReducedMotion) {
             const dy = (event.clientY - cy) / window.innerHeight;
             orbWrap.style.transform = `rotateY(${dx * 26}deg) rotateX(${-dy * 26}deg)`;
         }
-        // Background drifts a few px opposite the cursor for ambient depth.
         if (aurora) {
             const x = (event.clientX / window.innerWidth - 0.5) * -24;
             const y = (event.clientY / window.innerHeight - 0.5) * -24;
@@ -165,7 +246,7 @@ if (canHover && !prefersReducedMotion) {
 }
 
 // ---------------------------------------------------------------------------
-// Health check
+// Health
 // ---------------------------------------------------------------------------
 
 async function checkHealth() {
@@ -173,27 +254,38 @@ async function checkHealth() {
         const res = await fetch("/api/health");
         const data = await res.json();
 
-        if (data.ollama.ok) {
-            healthDot.className = "health-dot ok";
-            healthText.textContent = `Ollama ready (${data.models.chat})`;
-        } else if (data.ollama.reachable) {
-            healthDot.className = "health-dot bad";
-            healthText.textContent = `Missing models: ${data.ollama.missing.join(", ")}`;
-        } else {
+        // Report the blocking problem first: without Ollama or the database,
+        // nothing else works.
+        if (!data.ollama.reachable) {
             healthDot.className = "health-dot bad";
             healthText.textContent = "Ollama is not running";
+        } else if (data.ollama.missing.length > 0) {
+            healthDot.className = "health-dot bad";
+            healthText.textContent = `Missing models: ${data.ollama.missing.join(", ")}`;
+        } else if (!data.database.reachable) {
+            healthDot.className = "health-dot bad";
+            healthText.textContent = "Supabase unreachable";
+        } else if (!data.database.ok) {
+            healthDot.className = "health-dot bad";
+            healthText.textContent = "Database schema incomplete - run npm run migrate";
+        } else {
+            healthDot.className = "health-dot ok";
+            const chunks = data.stats?.chunks ?? 0;
+            healthText.textContent = `Ready · ${data.models.chat} · ${chunks} chunks`;
         }
-        brandOrb?.classList.toggle("status-bad", !data.ollama.ok);
 
-        // Restore state if a site is already loaded (e.g. page refresh).
-        if (data.siteLoaded && data.site && chatText.disabled) {
-            showSiteInfo(data.site);
-            setChatEnabled(true);
-        }
+        const healthy = data.ollama.ok && data.database.ok;
+        brandOrb?.classList.toggle("status-bad", !healthy);
+
+        // Chat only needs a non-empty corpus, not a site indexed in this tab.
+        setChatEnabled(healthy && (data.stats?.ready_sites ?? 0) > 0);
+        return data;
     } catch {
         healthDot.className = "health-dot bad";
         healthText.textContent = "Server unreachable";
         brandOrb?.classList.add("status-bad");
+        setChatEnabled(false);
+        return null;
     }
 }
 
@@ -201,47 +293,47 @@ async function checkHealth() {
 // Indexing
 // ---------------------------------------------------------------------------
 
-function describeProgress(indexing) {
-    const d = indexing.detail || {};
-    switch (indexing.phase) {
+function describeProgress(job) {
+    const d = job.detail || {};
+    switch (job.phase) {
         case "starting":
-            return { percent: 3, text: "Starting..." };
+            return { percent: 3, text: "Starting browser..." };
+        case "cached":
+            return { percent: 100, text: "Already indexed - loaded from Supabase." };
         case "crawling":
             return {
-                percent: 5 + (d.crawled / d.total) * 35,
-                text: `Crawling pages... ${d.crawled}/${d.total} (${d.url || ""})`,
+                percent: d.crawled ? 5 + (d.crawled / d.total) * 35 : 6,
+                text: d.crawled
+                    ? `Rendering pages... ${d.crawled}/${d.total} (${d.url || ""})`
+                    : "Rendering pages...",
             };
         case "chunking":
-            return { percent: 45, text: `Split content into ${d.chunks} chunks. Embedding next...` };
+            return { percent: 44, text: `Chunking ${d.pages} pages into tokens...` };
         case "embedding":
             return {
-                percent: 45 + (d.done / d.total) * 50,
-                text: `Embedding chunks... ${d.done}/${d.total}`,
+                percent: 46 + (d.total ? (d.done / d.total) * 46 : 0),
+                text: `Embedding chunks... ${d.done ?? 0}/${d.total ?? "?"}`,
             };
+        case "writing":
+            return { percent: 95, text: "Writing vectors to Supabase..." };
         case "done":
-            return { percent: 100, text: d.cached ? "Loaded from cache." : "Knowledge base ready." };
+            return { percent: 100, text: "Knowledge base ready." };
         default:
             return { percent: 0, text: "" };
     }
 }
 
-async function pollStatus() {
-    const res = await fetch("/api/status");
-    const data = await res.json();
-    const indexing = data.indexing;
-    if (!indexing) return { done: false };
-
-    if (indexing.phase === "error") {
-        return { done: true, error: indexing.error };
-    }
-
-    const { percent, text } = describeProgress(indexing);
-    setProgress(percent, text);
-
-    if (!indexing.active && indexing.phase === "done") {
-        return { done: true, site: data.site };
-    }
-    return { done: false };
+function showIndexedSite(site) {
+    if (!site) return;
+    siteInfo.classList.remove("hidden");
+    siteInfo.innerHTML = "";
+    const strong = document.createElement("strong");
+    strong.textContent = site.site_title || site.site_url;
+    siteInfo.appendChild(strong);
+    siteInfo.append(
+        ` - ${site.page_count} page${site.page_count === 1 ? "" : "s"} rendered, ` +
+        `${site.chunk_count} chunks embedded into Supabase.`
+    );
 }
 
 urlForm.addEventListener("submit", async (event) => {
@@ -252,7 +344,6 @@ urlForm.addEventListener("submit", async (event) => {
 
     indexBtn.disabled = true;
     urlInput.disabled = true;
-    setChatEnabled(false);
     siteInfo.classList.add("hidden");
     setProgress(2, "Contacting server...");
     brandOrb?.classList.add("status-busy");
@@ -261,27 +352,43 @@ urlForm.addEventListener("submit", async (event) => {
         const res = await fetch("/api/index", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ url, maxPages: Number(maxPagesInput.value) || 8 }),
+            body: JSON.stringify({ url, maxPages: Number(maxPagesInput.value) || 12 }),
         });
 
+        const started = await res.json().catch(() => ({}));
         if (!res.ok) {
-            const data = await res.json().catch(() => ({}));
-            throw new Error(data.error || `Request failed with status ${res.status}`);
+            throw new Error(started.error || `Request failed with status ${res.status}`);
         }
 
-        // Poll for progress until indexing finishes or fails.
+        const targetUrl = started.url;
+
+        // Poll until this job reports done or error. Progress lives server-side
+        // so a page refresh mid-index does not lose it.
         while (true) {
-            await new Promise((r) => setTimeout(r, 700));
-            const status = await pollStatus();
-            if (status.done) {
-                if (status.error) throw new Error(status.error);
-                showSiteInfo(status.site);
-                history.length = 0;
+            await new Promise((r) => setTimeout(r, 800));
+
+            const statusRes = await fetch("/api/status");
+            const status = await statusRes.json();
+            const job = (status.jobs || []).find((j) => j.url === targetUrl);
+
+            renderSites(status.sites, status.stats);
+            if (!job) continue;
+
+            if (job.phase === "error") throw new Error(job.error || "Indexing failed");
+
+            const { percent, text } = describeProgress(job);
+            setProgress(percent, text);
+
+            if (!job.active && (job.phase === "done" || job.phase === "cached")) {
+                const site = (status.sites || []).find((s) => s.site_url === targetUrl);
+                showIndexedSite(site);
                 addMessage(
                     "bot",
-                    `Knowledge base built for "${status.site.title || status.site.url}". Ask me anything about it.`
+                    `Indexed "${site?.site_title || targetUrl}". It is now part of the corpus - ` +
+                    "ask me anything and I will search every indexed site."
                 );
-                setChatEnabled(true);
+                urlInput.value = "";
+                await checkHealth();
                 break;
             }
         }
@@ -293,11 +400,12 @@ urlForm.addEventListener("submit", async (event) => {
         indexBtn.disabled = false;
         urlInput.disabled = false;
         brandOrb?.classList.remove("status-busy");
+        await loadSites();
     }
 });
 
 // ---------------------------------------------------------------------------
-// Chat (streams the answer token by token)
+// Chat
 // ---------------------------------------------------------------------------
 
 chatForm.addEventListener("submit", async (event) => {
@@ -310,6 +418,7 @@ chatForm.addEventListener("submit", async (event) => {
     addMessage("user", question);
     setChatEnabled(false);
     brandOrb?.classList.add("status-thinking");
+
     let typing = addTyping();
     let answerBubble = null;
     let answerText = "";
@@ -326,7 +435,6 @@ chatForm.addEventListener("submit", async (event) => {
             throw new Error(data.error || `Request failed with status ${res.status}`);
         }
 
-        // Read the NDJSON stream: {token} lines, then {done, sources}.
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
@@ -334,16 +442,19 @@ chatForm.addEventListener("submit", async (event) => {
 
         const handleLine = (line) => {
             if (!line.trim()) return;
-            const data = JSON.parse(line);
+            let data;
+            try {
+                data = JSON.parse(line);
+            } catch {
+                return;
+            }
             if (data.error) throw new Error(data.error);
 
             if (data.token) {
                 if (!answerBubble) {
-                    // First token arrived: swap the typing dots for a live bubble.
                     typing.remove();
                     typing = null;
-                    const made = makeMessage("bot");
-                    answerBubble = made.bubble;
+                    answerBubble = makeMessage("bot").bubble;
                     answerBubble.classList.add("streaming");
                 }
                 answerText += data.token;
@@ -358,7 +469,7 @@ chatForm.addEventListener("submit", async (event) => {
             if (done) break;
             buffer += decoder.decode(value, { stream: true });
             const lines = buffer.split("\n");
-            buffer = lines.pop();
+            buffer = lines.pop() ?? "";
             for (const line of lines) handleLine(line);
         }
         if (buffer.trim()) handleLine(buffer);
@@ -367,7 +478,7 @@ chatForm.addEventListener("submit", async (event) => {
 
         const answer = finalData?.answer ?? answerText;
         if (!answerBubble) {
-            // No tokens streamed (e.g. "nothing found" shortcut answer).
+            // No tokens streamed - a refusal short-circuits before generation.
             addMessage("bot", answer, finalData?.sources);
         } else {
             answerBubble.classList.remove("streaming");
@@ -375,18 +486,27 @@ chatForm.addEventListener("submit", async (event) => {
             if (finalData?.sources?.length) appendSources(answerBubble, finalData.sources);
         }
 
-        history.push({ role: "user", content: question });
-        history.push({ role: "assistant", content: answer });
-        while (history.length > 6) history.shift();
+        // Refusals are left out of history so they cannot anchor later turns.
+        if (!finalData?.refusal) {
+            history.push({ role: "user", content: question });
+            history.push({ role: "assistant", content: answer });
+            while (history.length > 6) history.shift();
+        }
     } catch (error) {
         if (typing) typing.remove();
         if (answerBubble) answerBubble.classList.remove("streaming");
         addMessage("error", `Something went wrong: ${error.message}`);
     } finally {
         setChatEnabled(true);
+        chatText.focus();
         brandOrb?.classList.remove("status-thinking");
     }
 });
 
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+
 checkHealth();
+loadSites();
 setInterval(checkHealth, 15000);

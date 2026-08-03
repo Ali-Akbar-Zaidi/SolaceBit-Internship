@@ -1,73 +1,114 @@
+import { truncateToTokens } from "../processing/chunker.js";
+
 /**
- * Ollama client
- *
- * Everything that talks to the locally running Ollama server lives here:
- * - embed()        -> nomic-embed-text  (Phase 3, embeddings)
- * - chat()         -> llama3            (Phase 5, answer generation)
- * - checkOllama()  -> health check used by the server / UI
- *
- * Uses Node's built-in fetch, exactly the API-call machinery from the
- * learning primer: POST request, JSON body, await the response.
+ * Ollama client: embeddings and chat completion.
  */
 
 export const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
 export const EMBED_MODEL = process.env.EMBED_MODEL || "nomic-embed-text";
-export const CHAT_MODEL = process.env.CHAT_MODEL || "llama3";
+export const CHAT_MODEL = process.env.CHAT_MODEL || "llama3.2:1b";
+
+// nomic-embed-text accepts 8192 tokens. Chunks are far smaller, but a hard cap
+// here stops a pathological input from being silently truncated by the server.
+const MAX_EMBED_TOKENS = 8000;
 
 /**
- * Embeds a single piece of text. Returns the embedding vector
- * (an array of numbers).
+ * L2-normalises a vector.
+ *
+ * pgvector's cosine operator normalises internally, but storing unit vectors
+ * keeps the stored data consistent and makes the `<=>` distance directly
+ * comparable to a plain dot product.
  */
+export function normalize(vector) {
+    let sumSquares = 0;
+    for (const value of vector) sumSquares += value * value;
+    const magnitude = Math.sqrt(sumSquares);
+    if (magnitude === 0) {
+        throw new Error("Cannot normalise a zero-magnitude embedding");
+    }
+    return vector.map((value) => value / magnitude);
+}
+
+/** Embeds one string and returns a unit vector. */
 export async function embed(text) {
+    const input = truncateToTokens(text, MAX_EMBED_TOKENS);
+
     const response = await fetch(`${OLLAMA_URL}/api/embeddings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: EMBED_MODEL, prompt: text, keep_alive: "15m" }),
+        body: JSON.stringify({ model: EMBED_MODEL, prompt: input, keep_alive: "15m" }),
     });
 
     if (!response.ok) {
-        throw new Error(`Embedding request failed with status ${response.status}`);
+        const detail = await response.text().catch(() => "");
+        throw new Error(
+            `Embedding request failed (${response.status}) ${detail.slice(0, 200)}`
+        );
     }
 
     const data = await response.json();
     if (!Array.isArray(data.embedding) || data.embedding.length === 0) {
         throw new Error("Ollama returned an empty embedding");
     }
-    return data.embedding;
+    return normalize(data.embedding);
 }
 
 /**
- * Embeds many texts with limited concurrency (Promise.all in batches),
- * so 100 chunks don't fire 100 simultaneous requests.
- * Calls onProgress({ done, total }) after each batch.
+ * Embeds many strings with bounded concurrency and retries.
+ *
+ * A single transient failure part-way through a large crawl would otherwise
+ * discard all prior work, so each item is retried before giving up.
  */
 export async function embedBatch(texts, options = {}) {
-    const { concurrency = 4, onProgress = () => { } } = options;
-    const embeddings = new Array(texts.length);
+    const { concurrency = 4, retries = 2, onProgress = () => { } } = options;
 
-    for (let i = 0; i < texts.length; i += concurrency) {
-        const batch = texts.slice(i, i + concurrency);
-        const results = await Promise.all(batch.map((text) => embed(text)));
-        results.forEach((vector, j) => {
-            embeddings[i + j] = vector;
-        });
-        onProgress({ done: Math.min(i + concurrency, texts.length), total: texts.length });
+    const embeddings = new Array(texts.length);
+    let completed = 0;
+
+    for (let start = 0; start < texts.length; start += concurrency) {
+        const slice = texts.slice(start, start + concurrency);
+
+        await Promise.all(
+            slice.map(async (text, offset) => {
+                let lastError;
+                for (let attempt = 0; attempt <= retries; attempt++) {
+                    try {
+                        embeddings[start + offset] = await embed(text);
+                        return;
+                    } catch (error) {
+                        lastError = error;
+                        if (attempt < retries) {
+                            await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+                        }
+                    }
+                }
+                throw new Error(
+                    `Failed to embed chunk ${start + offset} after ${retries + 1} attempts: ${lastError.message}`
+                );
+            })
+        );
+
+        completed += slice.length;
+        onProgress({ done: completed, total: texts.length });
     }
 
     return embeddings;
 }
 
 /**
- * Sends a chat conversation to the LLM and returns its reply text.
- * `messages` is an array of { role: "system"|"user"|"assistant", content }.
- *
- * The response is streamed and accumulated. Streaming matters on slower
- * machines: with stream:false the HTTP headers only arrive when generation
- * finishes, and Node's fetch aborts if headers take longer than 5 minutes.
- * With streaming, data flows immediately, so long generations are safe.
+ * Streaming chat completion. `onToken` receives text as it is produced so the
+ * UI can render immediately instead of waiting for the full answer.
  */
 export async function chat(messages, options = {}) {
-    const { temperature = 0.2, onToken = null } = options;
+    const {
+        // Zero temperature: the answer must be a faithful extract from the
+        // context, and sampling only invites the model to embellish it.
+        temperature = 0,
+        numPredict = Number(process.env.ANSWER_MAX_TOKENS) || 180,
+        numCtx = Number(process.env.OLLAMA_NUM_CTX) || 2560,
+        stop = null,
+        onToken = null,
+    } = options;
 
     const response = await fetch(`${OLLAMA_URL}/api/chat`, {
         method: "POST",
@@ -76,58 +117,58 @@ export async function chat(messages, options = {}) {
             model: CHAT_MODEL,
             messages,
             stream: true,
-            keep_alive: "30m", // keep the model loaded between questions
+            keep_alive: "30m",
             options: {
                 temperature,
-                num_predict: 400, // cap answer length so replies stay snappy
+                num_predict: numPredict,
+                // Explicit window. Left unset, Ollama applies a small default
+                // and silently drops the front of an oversized prompt, taking
+                // the retrieved context with it.
+                num_ctx: numCtx,
+                // Stop the model repeating itself instead of finishing early.
+                repeat_penalty: 1.15,
+                ...(stop && stop.length ? { stop } : {}),
             },
         }),
     });
 
     if (!response.ok) {
-        throw new Error(`Chat request failed with status ${response.status}`);
+        const detail = await response.text().catch(() => "");
+        throw new Error(`Chat request failed (${response.status}) ${detail.slice(0, 200)}`);
     }
 
-    // Ollama streams newline-delimited JSON objects; accumulate the pieces
-    // and forward each token to onToken (used for live streaming to the UI).
     const decoder = new TextDecoder();
     let buffer = "";
     let text = "";
 
-    const handleLine = (line) => {
-        if (!line.trim()) return;
-        const data = JSON.parse(line);
-        if (data.error) throw new Error(data.error);
-        const piece = data.message?.content ?? "";
-        if (piece) {
-            text += piece;
-            if (onToken) onToken(piece);
-        }
-    };
-
     for await (const chunk of response.body) {
         buffer += decoder.decode(chunk, { stream: true });
         const lines = buffer.split("\n");
-        buffer = lines.pop(); // keep any incomplete trailing line
-        for (const line of lines) handleLine(line);
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+            if (!line.trim()) continue;
+            let data;
+            try {
+                data = JSON.parse(line);
+            } catch {
+                continue;
+            }
+            if (data.error) throw new Error(data.error);
+            const piece = data.message?.content ?? "";
+            if (piece) {
+                text += piece;
+                if (onToken) onToken(piece);
+            }
+        }
     }
-    if (buffer.trim()) handleLine(buffer);
 
     return text.trim();
 }
 
-/**
- * Simple one-shot prompt helper (kept for CLI tests / the primer's askLLM).
- */
-export async function askLLM(prompt) {
-    return chat([{ role: "user", content: prompt }]);
-}
-
-/**
- * Checks that Ollama is reachable and that both required models are pulled.
- * Returns { ok, reachable, models: { chat, embed }, missing: [...] }.
- */
+/** Verifies Ollama is reachable and the required models are pulled. */
 export async function checkOllama() {
+    const models = { chat: CHAT_MODEL, embed: EMBED_MODEL };
     try {
         const response = await fetch(`${OLLAMA_URL}/api/tags`);
         if (!response.ok) throw new Error(`status ${response.status}`);
@@ -141,17 +182,12 @@ export async function checkOllama() {
         if (!has(CHAT_MODEL)) missing.push(CHAT_MODEL);
         if (!has(EMBED_MODEL)) missing.push(EMBED_MODEL);
 
-        return {
-            ok: missing.length === 0,
-            reachable: true,
-            models: { chat: CHAT_MODEL, embed: EMBED_MODEL },
-            missing,
-        };
+        return { ok: missing.length === 0, reachable: true, models, missing };
     } catch {
         return {
             ok: false,
             reachable: false,
-            models: { chat: CHAT_MODEL, embed: EMBED_MODEL },
+            models,
             missing: [CHAT_MODEL, EMBED_MODEL],
         };
     }
